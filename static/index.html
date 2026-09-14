@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>US Deep Zoom Map</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+
+  #panel {
+    position: absolute; top: 12px; right: 12px; z-index: 1000;
+    background: rgba(255,255,255,0.96); border-radius: 10px;
+    padding: 12px 14px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    width: 230px; font-size: 13px; color: #222;
+  }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; }
+  #panel label { display: block; margin: 8px 0 3px; font-weight: 600; color: #555; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+  #panel select { width: 100%; padding: 4px; font-size: 13px; }
+  #status { margin-top: 8px; color: #666; font-size: 12px; line-height: 1.4; }
+  #status .warn { color: #b45309; }
+  #legend { margin-top: 10px; }
+  #legend-title { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+  #legend-gradient { height: 10px; border-radius: 4px; }
+  #legend-labels { display: flex; justify-content: space-between; font-size: 10px; color: #666; margin-top: 2px; }
+
+  .layer-chip {
+    position: absolute; bottom: 12px; left: 12px; z-index: 1000;
+    background: rgba(20,20,20,0.82); color: #fff; padding: 6px 12px;
+    border-radius: 20px; font-size: 13px; font-weight: 600;
+  }
+  .leaflet-popup-content { font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="layer-chip" id="layerChip">county</div>
+<div class="layer-chip" id="basemapChip" style="left: auto; right: 12px; background: rgba(20,20,20,0.6);">street</div>
+
+<div id="panel">
+  <h1>US Deep Zoom Map</h1>
+
+  <label for="modeSelect">Layer</label>
+  <select id="modeSelect">
+    <option value="auto">Auto (zoom-driven)</option>
+    <option value="county">County</option>
+    <option value="tract">Census tract</option>
+    <option value="zcta">ZIP5 (ZCTA)</option>
+    <option value="hex3">Hex, resolution 3</option>
+    <option value="hex4">Hex, resolution 4</option>
+    <option value="hex5">Hex, resolution 5</option>
+    <option value="hex6">Hex, resolution 6</option>
+    <option value="hex7">Hex, resolution 7</option>
+    <option value="hex8">Hex, resolution 8</option>
+  </select>
+
+  <div id="legend">
+    <div id="legend-title">Loading...</div>
+    <div id="legend-gradient"></div>
+    <div id="legend-labels"><span id="legend-min"></span><span id="legend-max"></span></div>
+  </div>
+
+  <div id="status">Loading...</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const RAMP = ["#ffffcc","#ffeda0","#fed976","#feb24c","#fd8d3c","#fc4e2a","#e31a1c","#b10026"];
+
+const map = L.map('map', { zoomControl: true, minZoom: 3, maxZoom: 16 })
+  .setView([39.5, -98.35], 5);
+
+// Two basemaps: street map for context zoomed out, satellite imagery once
+// you're zoomed in close enough for it to actually show detail (roughly
+// where hex6+/tract-level layers kick in). Esri World Imagery is free and
+// needs no API key.
+const SATELLITE_MIN_ZOOM = 11;
+
+const streetLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  maxZoom: 19,
+});
+
+const satelliteLayer = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles &copy; Esri &mdash; Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+  maxZoom: 19,
+});
+
+streetLayer.addTo(map);
+let satelliteActive = false;
+
+function updateBasemap() {
+  const shouldBeSatellite = map.getZoom() >= SATELLITE_MIN_ZOOM;
+  if (shouldBeSatellite === satelliteActive) return;
+  satelliteActive = shouldBeSatellite;
+  if (satelliteActive) {
+    map.removeLayer(streetLayer);
+    satelliteLayer.addTo(map);
+  } else {
+    map.removeLayer(satelliteLayer);
+    streetLayer.addTo(map);
+  }
+  document.getElementById('basemapChip').textContent = satelliteActive ? 'satellite' : 'street';
+}
+
+let currentLayer = null;
+let metricLabel = "value";
+let fetchToken = 0;
+
+// Auto mode: maps Leaflet zoom -> data layer
+function autoLayerForZoom(z) {
+  if (z <= 5) return 'county';
+  if (z <= 7) return 'hex3';
+  if (z === 8) return 'hex4';
+  if (z === 9) return 'hex5';
+  if (z === 10) return 'hex6';
+  if (z === 11) return 'hex7';
+  return 'hex8';
+}
+
+function activeLayerName() {
+  const mode = document.getElementById('modeSelect').value;
+  return mode === 'auto' ? autoLayerForZoom(map.getZoom()) : mode;
+}
+
+function colorFor(v, min, max) {
+  if (max <= min) return RAMP[0];
+  // log-ish scale since population/area are heavily skewed
+  const t = Math.max(0, Math.min(1, (Math.log1p(v - min) / Math.log1p(max - min))));
+  const idx = Math.min(RAMP.length - 1, Math.floor(t * RAMP.length));
+  return RAMP[idx];
+}
+
+function fmt(v) {
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(1) + 'M';
+  if (v >= 1_000) return (v / 1_000).toFixed(1) + 'k';
+  return Math.round(v * 10) / 10;
+}
+
+async function refresh() {
+  const layer = activeLayerName();
+  document.getElementById('layerChip').textContent = layer;
+
+  const b = map.getBounds();
+  const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(',');
+  const token = ++fetchToken;
+
+  document.getElementById('status').innerHTML = 'Loading ' + layer + '...';
+
+  let data;
+  try {
+    const resp = await fetch(`/api/layer/${layer}?bbox=${bbox}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    data = await resp.json();
+  } catch (e) {
+    document.getElementById('status').innerHTML = '<span class="warn">Error: ' + e.message + '</span>';
+    return;
+  }
+  if (token !== fetchToken) return; // a newer request has since started
+
+  const values = data.features.map(f => f.properties.value).filter(v => v != null);
+  const min = values.length ? Math.min(...values) : 0;
+  const max = values.length ? Math.max(...values) : 1;
+
+  if (currentLayer) map.removeLayer(currentLayer);
+  const borderColor = satelliteActive ? '#fff' : '#444';
+  const fillOpacity = satelliteActive ? 0.55 : 0.65;
+  currentLayer = L.geoJSON(data, {
+    style: f => ({
+      fillColor: colorFor(f.properties.value, min, max),
+      fillOpacity,
+      color: borderColor,
+      weight: 0.6,
+    }),
+    onEachFeature: (f, l) => {
+      l.bindPopup(`<b>${f.properties.name}</b><br>${metricLabel}: ${fmt(f.properties.value)}`);
+      l.on('mouseover', () => l.setStyle({ weight: 2, color: satelliteActive ? '#fff' : '#111' }));
+      l.on('mouseout', () => l.setStyle({ weight: 0.6, color: borderColor }));
+    },
+  }).addTo(map);
+
+  document.getElementById('legend-gradient').style.background =
+    'linear-gradient(to right, ' + RAMP.join(',') + ')';
+  document.getElementById('legend-min').textContent = fmt(min);
+  document.getElementById('legend-max').textContent = fmt(max);
+  document.getElementById('legend-title').textContent = metricLabel;
+
+  let statusHtml = `${data.features.length.toLocaleString()} features`;
+  if (data.truncated) {
+    statusHtml += `<br><span class="warn">Only showing first ${data.features.length.toLocaleString()} of ${data.total.toLocaleString()} in view — zoom in for more detail.</span>`;
+  }
+  document.getElementById('status').innerHTML = statusHtml;
+}
+
+fetch('/api/metadata').then(r => r.json()).then(m => {
+  metricLabel = m.metric_label || 'value';
+  document.getElementById('legend-title').textContent = metricLabel;
+});
+
+document.getElementById('modeSelect').addEventListener('change', refresh);
+map.on('moveend', () => { updateBasemap(); refresh(); });
+updateBasemap();
+refresh();
+</script>
+</body>
+</html>
