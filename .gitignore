@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Built database and cached downloads are large (the DB alone is ~600MB) and
+# fully reproducible via `python data/build_data.py` -- not checked in.
+data/usmap.duckdb
+data/metadata.json
+data/raw/
